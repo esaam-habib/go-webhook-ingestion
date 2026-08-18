@@ -39,7 +39,17 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	svc := ingest.New(st, stats.NewCache(), rdb, log)
+	cache := stats.NewCache()
+	seed, err := st.AllAccountStats(ctx)
+	if err != nil {
+		log.Error("seed stats cache", "err", err)
+		os.Exit(1)
+	}
+	for accountID, s := range seed {
+		cache.Seed(accountID, stats.AccountStats{CallCount: s.CallCount, TotalDurationSec: s.TotalDurationSec})
+	}
+
+	svc := ingest.New(st, cache, rdb, log)
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
 
 	go func() {

@@ -121,6 +121,28 @@ func (s *Store) IncrementAccountStats(ctx context.Context, accountID string, dur
 	return err
 }
 
+// AllAccountStats reads every account's durable aggregate, keyed by account_id.
+// Used to warm the in-memory stats cache on startup so a deploy does not make
+// previously accumulated totals appear to vanish.
+func (s *Store) AllAccountStats(ctx context.Context) (map[string]Stats, error) {
+	rows, err := s.pool.Query(ctx, `SELECT account_id, call_count, total_duration_sec FROM account_stats`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]Stats)
+	for rows.Next() {
+		var accountID string
+		var st Stats
+		if err := rows.Scan(&accountID, &st.CallCount, &st.TotalDurationSec); err != nil {
+			return nil, err
+		}
+		out[accountID] = st
+	}
+	return out, rows.Err()
+}
+
 // AccountStats reads the durable aggregate. A missing account reads as zero.
 func (s *Store) AccountStats(ctx context.Context, accountID string) (Stats, error) {
 	var st Stats
