@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -59,6 +60,36 @@ func TestWebhookStoresEventAndCall(t *testing.T) {
 	if gotAccount != accountID {
 		t.Fatalf("call belongs to %q, want %q", gotAccount, accountID)
 	}
+}
+
+// TestRecordingIsMarkedProcessed verifies that the background goroutine
+// completes even after the HTTP handler has returned and cancelled its context.
+// Before the fix (using context.WithoutCancel), processRecording received a
+// cancelled context and the UPDATE never ran.
+func TestRecordingIsMarkedProcessed(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// Poll until recording_processed flips to true (goroutine takes around ~50ms).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var processed bool
+		row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+		if err := row.Scan(&processed); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if processed {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("recording_processed never became true — goroutine context was likely cancelled")
 }
 
 func TestDuplicateDeliveryIsIgnored(t *testing.T) {
