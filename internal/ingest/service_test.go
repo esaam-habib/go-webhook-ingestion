@@ -92,6 +92,53 @@ func TestRecordingIsMarkedProcessed(t *testing.T) {
 	t.Fatal("recording_processed never became true — goroutine context was likely cancelled")
 }
 
+// TestConcurrentDuplicateDelivery fires the same event_id from many goroutines
+// simultaneously. Before the fix (UNIQUE constraint + ON CONFLICT DO NOTHING)
+// the racy EventExists→InsertEvent pattern allowed multiple inserts to slip
+// through, causing double-counting in account_stats.
+func TestConcurrentDuplicateDelivery(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	const concurrent = 20
+	errs := make(chan error, concurrent)
+	for i := 0; i < concurrent; i++ {
+		go func() {
+			resp, err := http.Post(srv.URL+"/webhooks/calls", "application/json", strings.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = resp.Body.Close()
+			errs <- nil
+		}()
+	}
+	for i := 0; i < concurrent; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("request error: %v", err)
+		}
+	}
+
+	var eventCount int
+	if err := st.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM events WHERE event_id = $1`, eventID).Scan(&eventCount); err != nil {
+		t.Fatalf("scan events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("events stored = %d, want 1", eventCount)
+	}
+
+	stats, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if stats.CallCount != 1 {
+		t.Fatalf("account_stats.call_count = %d, want 1", stats.CallCount)
+	}
+}
+
 func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	srv, st := testutil.NewServer(t)
 	eventID, callID, accountID := testutil.IDs(t, st)
