@@ -24,6 +24,27 @@ func TestCacheRecordAccumulates(t *testing.T) {
 	}
 }
 
+// TestCacheRecordConcurrentIsSafe fails with -race before the write lock was added to Record.
+func TestCacheRecordConcurrentIsSafe(t *testing.T) {
+	c := stats.NewCache()
+	const goroutines = 50
+	done := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			c.Record("acc_race", 10)
+			_ = c.Get("acc_race")
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+	got := c.Get("acc_race")
+	if got.CallCount != goroutines {
+		t.Fatalf("CallCount = %d, want %d", got.CallCount, goroutines)
+	}
+}
+
 func TestCacheGetUnknownAccountIsZero(t *testing.T) {
 	c := stats.NewCache()
 	if got := c.Get("nobody"); got.CallCount != 0 || got.TotalDurationSec != 0 {

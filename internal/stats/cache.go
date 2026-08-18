@@ -37,6 +37,8 @@ func (c *Cache) Get(accountID string) AccountStats {
 
 // Record folds one completed call into an account's running totals.
 func (c *Cache) Record(accountID string, durationSec int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	s, ok := c.m[accountID]
 	if !ok {
@@ -45,4 +47,11 @@ func (c *Cache) Record(accountID string, durationSec int) {
 	}
 	s.CallCount++
 	s.TotalDurationSec += int64(durationSec)
+}
+
+// Seed pre-populates an account's totals, used to warm the cache from durable storage on startup.
+func (c *Cache) Seed(accountID string, st AccountStats) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[accountID] = &AccountStats{CallCount: st.CallCount, TotalDurationSec: st.TotalDurationSec}
 }
