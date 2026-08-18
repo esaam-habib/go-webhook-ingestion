@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,11 +23,33 @@ type Service struct {
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+
+	// bg tracks in-flight background goroutines (e.g. recording processing)
+	// so Shutdown can wait for them to finish instead of letting the process
+	// exit and silently kill whatever was still in flight.
+	bg sync.WaitGroup
 }
 
 // New builds a Service.
 func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger) *Service {
 	return &Service{store: s, cache: c, rdb: rdb, log: log}
+}
+
+// Shutdown waits for in-flight background work to finish, or for ctx to be
+// done, whichever comes first. Call it during graceful shutdown, after the
+// HTTP server has stopped accepting new requests.
+func (s *Service) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.bg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Stats returns the cached totals for an account.
@@ -74,7 +97,9 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 	// handler returning (which cancels the request context).
 	if rec.RecordingURL != "" {
 		bgCtx := context.WithoutCancel(ctx)
+		s.bg.Add(1)
 		go func() {
+			defer s.bg.Done()
 			if err := s.processRecording(bgCtx, rec); err != nil {
 				s.log.Error("processRecording failed", "call_id", rec.CallID, "err", err)
 			}

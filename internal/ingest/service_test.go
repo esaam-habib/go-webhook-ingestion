@@ -3,11 +3,17 @@ package ingest_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/convin/webhook-ingest/internal/config"
+	"github.com/convin/webhook-ingest/internal/ingest"
+	"github.com/convin/webhook-ingest/internal/redisclient"
+	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -136,6 +142,54 @@ func TestConcurrentDuplicateDelivery(t *testing.T) {
 	}
 	if stats.CallCount != 1 {
 		t.Fatalf("account_stats.call_count = %d, want 1", stats.CallCount)
+	}
+}
+
+// TestShutdownWaitsForInFlightRecordingProcessing simulates a deploy: a
+// webhook is ingested (spawning a background recording-processing goroutine)
+// and the process is asked to shut down immediately afterwards, before that
+// goroutine has had a chance to finish. Before Service tracked background
+// goroutines with a WaitGroup, Shutdown had no way to know they existed, so
+// a deploy would tear the process down mid-flight and the UPDATE that marks
+// recording_processed would simply never happen.
+func TestShutdownWaitsForInFlightRecordingProcessing(t *testing.T) {
+	st := testutil.NewStore(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	cfg := config.Load()
+	rdb, err := redisclient.New(ctx, cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("connect to redis: %v", err)
+	}
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	evt := ingest.Event{
+		EventID: eventID, CallID: callID, AccountID: accountID,
+		Status: "completed", DurationSec: 10,
+		RecordingURL: "https://recordings.example.com/" + callID + ".wav",
+	}
+	if err := svc.Ingest(ctx, evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Shut down immediately, mimicking a deploy landing right after ack.
+	shutdownCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown did not wait for in-flight work: %v", err)
+	}
+
+	var processed bool
+	row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !processed {
+		t.Fatal("recording_processed is false — Shutdown returned before background work finished")
 	}
 }
 

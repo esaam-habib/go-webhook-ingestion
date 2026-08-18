@@ -70,4 +70,7 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		log.Error("background work did not finish before shutdown deadline", "err", err)
+	}
 }
